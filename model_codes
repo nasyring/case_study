@@ -1,0 +1,164 @@
+# Load the data
+train = read.csv("E:\\Documents\\Uptake\\train.csv")
+test = read.csv("E:\\Documents\\Uptake\\test.csv")
+marketing = read.csv("E:\\Documents\\Uptake\\zipCodeMarketingCosts.csv")
+
+# Load libraries
+library(gbm)
+library(caret)
+library(e1071)
+
+# Feature creation
+train$rfa_3r = train$rfa_3[1]
+train$rfa_3f = train$rfa_3[2]
+train$rfa_3a = train$rfa_3[3]
+test$rfa_3r = test$rfa_3[1]
+test$rfa_3f = test$rfa_3[2]
+test$rfa_3a = test$rfa_3[3]
+
+# Marketing Cost for Test Set
+len_test = length(test$zip)
+test$m_cost = rep(NA,len_test)
+for(i in 1:len_test){
+	 s = toString(test$zip[17])
+	 s = strtoi(substring(s,1,5))
+	 m = which(marketing$zip==s)
+	 test$m_cost[i] = marketing$marketingCost[i]
+}
+
+
+# Loss function for evaluationg accuracy of models predicting response to marketing
+LogLossBinary = function(actual, predicted, eps = 1e-15) {  
+    predicted = pmin(pmax(predicted, eps), 1-eps)  
+    - (sum(actual * log(predicted) + (1 - actual) * log(1 - predicted))) / length(actual)
+}
+
+# Model whether or not a household responds to marketing
+sample.proportion =  sum(train$responded)/nrow(train)
+
+
+dataSubsetProportion = 0.8
+randomRows = sample(1:nrow(train), floor(nrow(train) * dataSubsetProportion))
+trainingHoldoutSet = train[randomRows, ]
+trainingNonHoldoutSet = train[!(1:nrow(train) %in% randomRows), ]
+
+gbmForTesting = gbm(responded ~ state + mailcode + noexch + has_chapter + recinhse + recp3 + recpgvg + recsweep + domain + cluster + age + homeownr + gender + wealth1 + hit + major +
+				numchld + income_range + solp3 + solih + pepstrfl + wealth2 + ngiftall + cardgift + lastdate + +rfa_3f+rfa_2f + mdmaud_r + mdmaud_f + cluster2, data = trainingNonHoldoutSet, distribution = "bernoulli", n.trees = 1500,
+				interaction.depth = 1, n.minobsinnode = 50, shrinkage = 0.01, bag.fraction = 0.5, train.fraction = 1.0, cv.folds=0,keep.data = TRUE,
+    				verbose = "CV")
+
+gbmHoldoutPredictions = predict(object = gbmForTesting,
+                                newdata = trainingHoldoutSet,
+                                n.trees = 1000,
+                                type = "response")
+
+gbmNonHoldoutPredictions = predict(object = gbmForTesting,
+                                   newdata = trainingNonHoldoutSet,
+                                   n.trees = 1000,
+                                   type = "response")
+# Compare model predictions to random predictions
+print(paste(LogLossBinary(trainingHoldoutSet$responded, gbmHoldoutPredictions), 
+            "Holdout Log Loss"))
+print(paste(LogLossBinary(trainingNonHoldoutSet$responded, gbmNonHoldoutPredictions), 
+            "Non-Holdout Log Loss"))
+print(paste(LogLossBinary(trainingHoldoutSet$responded, rep(sample.proportion,length(trainingHoldoutSet$responded))), 
+            "Holdout Log Loss"))
+print(paste(LogLossBinary(trainingNonHoldoutSet$responded, rep(sample.proportion,length(trainingNonHoldoutSet$responded))), 
+            "Non-Holdout Log Loss"))
+
+# Optional tuning of response predictive model using cross validation
+predictor_set = c("responded","has_chapter","recinhse","recp3","recpgvg","recsweep","domain","cluster","age","homeownr","gender","wealth1","hit","major",
+				"wealth2","ngiftall","cardgift","lastdate","rfa_2f","rfa_3f,"mdmaud_r","mdmaud_f","cluster2")
+gbmWithCrossValidation = gbm(responded ~ has_chapter + recinhse + recp3 + recpgvg + recsweep + domain + cluster + age + homeownr + gender + wealth1 + hit + major +
+				wealth2 + ngiftall + cardgift + lastdate + rfa_2f + mdmaud_r + mdmaud_f + cluster2,
+                             distribution = "bernoulli",
+                             data = trainingNonHoldoutSet[,predictor_set],
+                             n.trees = 3000,
+                             shrinkage = .01,
+                             n.minobsinnode = 100, 
+                             cv.folds = 5,
+                             n.cores = 1)
+bestTreeForPrediction = gbm.perf(gbmWithCrossValidation)
+# GBM says >3000 trees should be used but the loss is flattening out quite a bit
+bestTreeForPrediction
+
+# tuning parameters of the GBM using caret package
+
+gbmGrid <- expand.grid(interaction.depth = c(1,2,3), n.trees = c(2000,2500,3000), shrinkage = c(.1,.01,.001),n.minobsinnode = 100)
+gbmFit <- train(trainingNonHoldoutSet[,c("has_chapter","recinhse","recp3","recpgvg","recsweep","domain","cluster","age","homeownr","gender","wealth1","hit","major",
+				"wealth2","ngiftall","cardgift","lastdate","rfa_2f","rfa_3f","cluster2")], factor(trainingNonHoldoutSet[,c("responded")]),method = "gbm", verbose = FALSE,bag.fraction = 0.5, tuneGrid = gbmGrid)
+
+# Predicting Response on the test set
+
+testPredictionsResponse = predict(object = gbmForTesting,
+                                newdata = test,
+                                n.trees = 1500,
+                                type = "response")
+
+
+# Predict the amount of the donation
+dataSubsetProportion = 0.8
+train_subset = train[!is.na(train$amount),]
+randomRows = sample(1:nrow(train_subset), floor(nrow(train_subset) * dataSubsetProportion))
+trainingHoldoutSet = train_subset[randomRows, ]
+trainingNonHoldoutSet = train_subset[!(1:nrow(train_subset) %in% randomRows), ]
+
+
+vars = c("amount","rfa_2a", "rfa_3a","avggift", "minramnt", "maxramnt", "ramnt_14", "ramnt_24", "has_chapter", "recinhse", "recp3", "recpgvg", "recsweep", "domain", "cluster", "age", "homeownr", "gender", "wealth1", "hit", "major",
+				"wealth2", "cluster2")
+pred_vars = c("rfa_2a","rfa_3a", "avggift", "minramnt", "maxramnt", "ramnt_14", "ramnt_24", "has_chapter", "recinhse", "recp3", "recpgvg", "recsweep", "domain", "cluster", "age", "homeownr", "gender", "wealth1", "hit", "major",
+				"wealth2", "cluster2")
+gbmForTesting = gbm(amount ~ rfa_2a+rfa_3a+avggift+minramnt+maxramnt+ramnt_14+ramnt_24+has_chapter+recinhse+recp3+recpgvg+recsweep+domain+cluster+age+homeownr+gender+wealth1+hit+major+
+				wealth2+cluster2,data = trainingNonHoldoutSet, distribution = "gaussian", n.trees = 1500,
+				interaction.depth = 1, n.minobsinnode = 50, shrinkage = 0.01, bag.fraction = 0.5, train.fraction = 1.0, cv.folds=0,keep.data = TRUE,
+    				verbose = "CV")
+
+gbmHoldoutPredictions = predict(object = gbmForTesting,
+                                newdata = trainingHoldoutSet,
+                                n.trees = 1000,
+                                type = "response")
+
+gbmNonHoldoutPredictions = predict(object = gbmForTesting,
+                                   newdata = trainingNonHoldoutSet,
+                                   n.trees = 1000,
+                                   type = "response")
+# Compare model predictions to random predictions
+
+squaredErrorLoss = function(X){
+	f_xy = function(x){return((x[1] - x[2])^2)}
+	return(sum(apply(X,1,f_xy)))
+}
+
+print(paste(squaredErrorLoss(cbind(trainingHoldoutSet$amount, gbmHoldoutPredictions)), 
+            "Holdout Squared Error Loss"))
+print(paste(squaredErrorLoss(cbind(trainingNonHoldoutSet$amount, gbmNonHoldoutPredictions)), 
+            "Non-Holdout Squared Error Loss"))
+print(paste(squaredErrorLoss(cbind(trainingHoldoutSet$amount, rep(mean(trainingHoldoutSet$amount),length(trainingHoldoutSet$amount)))), 
+            "Holdout Squared Error Loss"))
+print(paste(squaredErrorLoss(cbind(trainingNonHoldoutSet$amount, rep(mean(trainingNonHoldoutSet$amount),length(trainingNonHoldoutSet$amount)))), 
+            "Non-Holdout Squared Error Loss"))
+
+# Predicting amount on the test set
+testPredictionsAmount = predict(object = gbmForTesting,
+                                newdata = test,
+                                n.trees = 1500,
+                                type = "response")
+
+# Test set revenue
+expectedRevenue = testPredictionsResponse*testPredictionsAmount
+
+# Test set profit
+expectedProfit = expectedRevenue - test$m_cost
+sum(expectedProfit)
+sum(expectedProfit[expectedProfit>0])
+length(expectedProfit)
+length(expectedProfit[expectedProfit>0])
+# Test set select which to market to
+test$market = ifelse(expectedProfit>0,1,0)
+
+# save the scored data
+test = test[,!(names(test) %in% c("m_cost","rfa_3f","rfa_3a","rfa_3r"))]
+write.csv(test, "E:\\Documents\\Uptake\\test.csv")
+
+
+
